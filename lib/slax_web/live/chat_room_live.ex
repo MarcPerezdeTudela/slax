@@ -5,8 +5,7 @@ defmodule SlaxWeb.ChatRoomLive do
   alias Slax.Chat.{Message, Room}
 
   def mount(_params, _session, socket) do
-    rooms = Chat.list_rooms()
-    {:ok, assign(socket, rooms: rooms)}
+    {:ok, socket}
   end
 
   def handle_event("submit-message", %{"message" => message_params}, socket) do
@@ -46,6 +45,7 @@ defmodule SlaxWeb.ChatRoomLive do
           Chat.get_first_room!()
       end
 
+    rooms = Chat.list_rooms()
     messages = Chat.list_messages_in_room(room)
 
     {:noreply,
@@ -56,6 +56,7 @@ defmodule SlaxWeb.ChatRoomLive do
        room: room
      )
      |> stream(:messages, messages, reset: true)
+     |> stream(:rooms, rooms)
      |> assign_message_form(Chat.change_message(%Message{}))}
   end
 
@@ -77,8 +78,13 @@ defmodule SlaxWeb.ChatRoomLive do
         <div class="flex items-center h-8 px-3 group">
           <span class="ml-2 leading-none font-medium text-sm">Rooms</span>
         </div>
-        <div id="rooms-list">
-          <.room_link :for={room <- @rooms} room={room} active={room.id == @room.id} />
+        <div id="rooms-list" phx-update="stream">
+          <.room_link
+            :for={{dom_id, room} <- @streams.rooms}
+            dom_id={dom_id}
+            room={room}
+            active={room == @room}
+          />
         </div>
       </div>
     </div>
@@ -173,12 +179,14 @@ defmodule SlaxWeb.ChatRoomLive do
     """
   end
 
+  attr :dom_id, :string, required: true
   attr :active, :boolean, required: true
   attr :room, Room, required: true
 
   defp room_link(assigns) do
     ~H"""
     <.link
+      id={@dom_id}
       class={[
         "flex items-center h-8 text-sm pl-8 pr-3",
         (@active && "bg-slate-300") || "hover:bg-slate-300"

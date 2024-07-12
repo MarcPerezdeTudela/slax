@@ -46,6 +46,7 @@ defmodule SlaxWeb.ChatRoomLive.Edit do
       {:ok, room} ->
         {:noreply,
          socket
+         |> stream_insert(:rooms, room)
          |> put_flash(:info, "Room updated successfully")
          |> push_navigate(to: ~p"/rooms/#{room}")}
 
