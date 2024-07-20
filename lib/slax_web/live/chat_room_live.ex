@@ -10,6 +10,7 @@ defmodule SlaxWeb.ChatRoomLive do
   def mount(_params, _session, socket) do
     timezone = get_connect_params(socket)["timezone"]
     users = Accounts.list_users()
+    rooms = Chat.list_joined_rooms_with_unread_counts(socket.assigns.current_user)
 
     if connected?(socket) do
       OnlineUsers.track(self(), socket.assigns.current_user)
@@ -17,10 +18,13 @@ defmodule SlaxWeb.ChatRoomLive do
 
     OnlineUsers.subscribe()
 
+    Enum.each(rooms, fn {chat, _} -> Chat.subscribe_to_room(chat) end)
+
     socket =
       socket
       |> assign(timezone: timezone, users: users)
       |> assign(online_users: OnlineUsers.list())
+      |> assign(rooms: rooms)
       |> stream_configure(:messages,
         dom_id: fn
           %Message{id: id} -> "messages-#{id}"
@@ -69,23 +73,39 @@ defmodule SlaxWeb.ChatRoomLive do
     current_user = socket.assigns.current_user
     Chat.join_room!(socket.assigns.room, current_user)
     Chat.subscribe_to_room(socket.assigns.room)
-    rooms = Chat.list_joined_rooms(current_user)
 
-    {:noreply,
-     socket
-     |> assign(joined?: true)
-     |> stream(:rooms, rooms)}
+    socket =
+      assign(socket,
+        joined?: true,
+        rooms: Chat.list_joined_rooms_with_unread_counts(current_user)
+      )
+
+    {:noreply, socket}
   end
 
   def handle_info({:new_message, message}, socket) do
-    if message.room_id == socket.assigns.room.id do
-      Chat.update_last_read_id(message.room, socket.assigns.current_user)
-    end
+    room = socket.assigns.room
 
     socket =
-      socket
-      |> stream_insert(:messages, message)
-      |> push_event("scroll_messages_to_bottom", %{})
+      cond do
+        message.room_id == room.id ->
+          Chat.update_last_read_id(room, socket.assigns.current_user)
+
+          socket
+          |> stream_insert(:messages, message)
+          |> push_event("scroll_messages_to_bottom", %{})
+
+        message.user_id != socket.assigns.current_user.id ->
+          update(socket, :rooms, fn rooms ->
+            Enum.map(rooms, fn
+              {%Room{id: id} = room, count} when id == message.room_id -> {room, count + 1}
+              other -> other
+            end)
+          end)
+
+        true ->
+          socket
+      end
 
     {:noreply, socket}
   end
@@ -101,8 +121,6 @@ defmodule SlaxWeb.ChatRoomLive do
   end
 
   def handle_params(params, _session, socket) do
-    if socket.assigns[:room], do: Chat.unsubscribe_from_room(socket.assigns.room)
-
     room =
       case Map.fetch(params, "id") do
         {:ok, id} ->
@@ -112,7 +130,6 @@ defmodule SlaxWeb.ChatRoomLive do
           Chat.get_first_room!()
       end
 
-    rooms = Chat.list_joined_rooms(socket.assigns.current_user)
     last_read_id = Chat.get_last_read_id(room, socket.assigns.current_user)
 
     messages =
@@ -121,7 +138,6 @@ defmodule SlaxWeb.ChatRoomLive do
       |> maybe_insert_unread_marker(last_read_id)
 
     Chat.update_last_read_id(room, socket.assigns.current_user)
-    Chat.subscribe_to_room(room)
 
     {:noreply,
      socket
@@ -132,9 +148,16 @@ defmodule SlaxWeb.ChatRoomLive do
        room: room
      )
      |> stream(:messages, messages, reset: true)
-     |> stream(:rooms, rooms)
      |> assign_message_form(Chat.change_message(%Message{}))
-     |> push_event("scroll_messages_to_bottom", %{})}
+     |> push_event("scroll_messages_to_bottom", %{})
+     |> update(:rooms, fn rooms ->
+       room_id = room.id
+
+       Enum.map(rooms, fn
+         {%Room{id: ^room_id} = room, _} -> {room, 0}
+         other -> other
+       end)
+     end)}
   end
 
   defp maybe_insert_unread_marker(messages, nil), do: messages
@@ -167,12 +190,12 @@ defmodule SlaxWeb.ChatRoomLive do
         <div class="flex items-center h-8 px-3 group">
           <span class="ml-2 leading-none font-medium text-sm">Rooms</span>
         </div>
-        <div id="rooms-list" phx-update="stream">
+        <div id="rooms-list">
           <.room_link
-            :for={{dom_id, room} <- @streams.rooms}
-            dom_id={dom_id}
+            :for={{room, unread_count} <- @rooms}
             room={room}
             active={room.id == @room.id}
+            unread_count={unread_count}
           />
         </div>
 
@@ -348,14 +371,13 @@ defmodule SlaxWeb.ChatRoomLive do
     """
   end
 
-  attr :dom_id, :string, required: true
   attr :active, :boolean, required: true
   attr :room, Room, required: true
+  attr :unread_count, :integer, required: true
 
   defp room_link(assigns) do
     ~H"""
     <.link
-      id={@dom_id}
       class={[
         "flex items-center h-8 text-sm pl-8 pr-3",
         (@active && "bg-slate-300") || "hover:bg-slate-300"
@@ -366,6 +388,7 @@ defmodule SlaxWeb.ChatRoomLive do
       <span class={["ml-2 leading-none", @active && "font-bold"]}>
         <%= @room.name %>
       </span>
+      <.unread_message_counter count={@unread_count} />
     </.link>
     """
   end
@@ -400,6 +423,19 @@ defmodule SlaxWeb.ChatRoomLive do
         </div>
       </div>
     </div>
+    """
+  end
+
+  attr :count, :integer, required: true
+
+  defp unread_message_counter(assigns) do
+    ~H"""
+    <span
+      :if={@count > 0}
+      class="flex items-center justify-center bg-blue-500 rounded-full font-medium h-5 px-2 ml-auto text-xs text-white"
+    >
+      <%= @count %>
+    </span>
     """
   end
 
